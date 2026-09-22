@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * QuotationService 单元测试（场景1 的被测服务）。
@@ -49,13 +50,12 @@ class QuotationServiceTest {
     }
 
     @Test
-    void generateQuotation_leavesTempFileWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
-        // 场景1 的 bug 开关（QUOTATION_TEMP_LEAK=true）：finally 不清理 → 反复调用写满磁盘。
-        // 这是**特征化测试**：钉住开关的现状，而不是断言它「正确」——
-        // 要验证修复，应当反过来断言 leak 开启时也不留文件。
+    void generateQuotation_cleansUpItsTempFileEvenWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
+        // 修复后断言：即使历史开关 QUOTATION_TEMP_LEAK=true，临时文件也必须被清理 ——
+        // 否则反复调用会无界累积写满 /data/tmp（本次故障根因：磁盘写满 → 报价单 500）。
         service(tmp, true).generateQuotation("ORD-1003");
 
-        assertThat(countOf(tmp, "quotation_")).isEqualTo(1);
+        assertThat(countOf(tmp, "quotation_")).isZero();
     }
 
     @Test
@@ -66,6 +66,19 @@ class QuotationServiceTest {
         service(nested, false).generateQuotation("ORD-1004");
 
         assertThat(nested).exists();
+    }
+
+    @Test
+    void generateQuotation_failsFastWithoutLeftoverWhenFreeSpaceBelowThreshold(@TempDir Path tmp) throws IOException {
+        QuotationService svc = service(tmp, false);
+        // 阈值抬到不可能满足的值，等价于模拟「临时目录即将写满」
+        ReflectionTestUtils.setField(svc, "minFreeBytes", Long.MAX_VALUE);
+
+        // 资源不足应当是独立的异常类型（HTTP 层映射 503 + Retry-After），而不是业务失败
+        assertThatThrownBy(() -> svc.generateQuotation("ORD-1005"))
+                .isInstanceOf(QuotationUnavailableException.class);
+        // 快速失败：连半截临时文件都不该留下
+        assertThat(countOf(tmp, "quotation_")).isZero();
     }
 
     @Test

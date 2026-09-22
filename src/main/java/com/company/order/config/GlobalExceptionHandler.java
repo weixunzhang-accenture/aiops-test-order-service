@@ -1,9 +1,11 @@
 package com.company.order.config;
 
+import com.company.order.service.QuotationUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -43,6 +45,9 @@ public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
+    /** 资源不足时建议调用方重试的秒数。 */
+    private static final String RETRY_AFTER_SECONDS = "30";
+
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {
         // Spring MVC 自带的错误（缺必填参数 400 / 方法不支持 405 / 路径不存在 404 …）都实现
@@ -56,5 +61,22 @@ public class GlobalExceptionHandler {
         // 日志因此带上它 —— 这是本类存在的全部理由。
         log.error("unhandled exception: {} {}", request.getMethod(), request.getRequestURI(), e);
         response.sendError(HttpStatus.INTERNAL_SERVER_ERROR.value());
+    }
+
+    /**
+     * 资源不足（节点磁盘/临时目录写满）：这是**可重试的临时故障**，不是报价单业务错误。
+     * 因此返回 503 + {@code Retry-After}，让上游按重试处理，而不是把它误判成 500 业务失败。
+     *
+     * <p>注意：@ExceptionHandler 的匹配比 {@link #handle} 更具体，故优先命中本方法；
+     * 这里仍带 traceId 记 ERROR（TraceFilter 的 MDC 尚未清理）。
+     */
+    @ExceptionHandler(QuotationUnavailableException.class)
+    public void handleUnavailable(QuotationUnavailableException e, HttpServletRequest request,
+                                  HttpServletResponse response) throws IOException {
+        log.error("resource exhausted, rejecting fast: {} {} — {}",
+                request.getMethod(), request.getRequestURI(), e.getMessage(), e);
+        response.setHeader(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS);
+        response.sendError(HttpStatus.SERVICE_UNAVAILABLE.value(),
+                "service temporarily unavailable (resource exhausted), please retry");
     }
 }
