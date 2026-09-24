@@ -1,15 +1,21 @@
 package com.company.order.config;
 
+import com.company.order.service.QuotationStorageException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.ErrorResponse;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 未处理异常的日志落点 —— 让 ERROR 日志带上 traceId。
@@ -37,11 +43,36 @@ import java.io.IOException;
  *
  * <p>响应体不在这里拼：统一走 {@code sendError} 交回容器的 {@code /error}
  * （{@code BasicErrorController}），保证与改动前**完全一致**。
+ * 唯一例外是 {@link QuotationStorageException}：那是「存储暂时不可用、可重试」的语义，
+ * 必须显式返回 503，不能落进下面 {@code Exception} 分支的 500。
  */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /**
+     * 报价单落盘失败（磁盘空间不足等）：503 + Retry-After + retryable 标识。
+     * 比 {@code Exception} 分支更具体，优先匹配；保证调用方能区分「重试无用」与「重试有效」。
+     */
+    @ExceptionHandler(QuotationStorageException.class)
+    public ResponseEntity<Map<String, Object>> handleQuotationStorage(QuotationStorageException e,
+                                                                     HttpServletRequest request) {
+        // 与其它未处理异常一样在这里记 ERROR，MDC 里的 traceId 仍在
+        log.error("storage unavailable: {} {}", request.getMethod(), request.getRequestURI(), e);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", HttpStatus.SERVICE_UNAVAILABLE.value());
+        body.put("error", HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase());
+        body.put("message", e.getMessage());
+        body.put("path", request.getRequestURI());
+        body.put("retryable", e.isRetryable());
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, "5")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
+    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {
