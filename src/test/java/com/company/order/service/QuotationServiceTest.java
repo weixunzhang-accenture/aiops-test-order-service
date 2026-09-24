@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * QuotationService 单元测试（场景1 的被测服务）。
@@ -49,13 +50,12 @@ class QuotationServiceTest {
     }
 
     @Test
-    void generateQuotation_leavesTempFileWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
-        // 场景1 的 bug 开关（QUOTATION_TEMP_LEAK=true）：finally 不清理 → 反复调用写满磁盘。
-        // 这是**特征化测试**：钉住开关的现状，而不是断言它「正确」——
-        // 要验证修复，应当反过来断言 leak 开启时也不留文件。
+    void generateQuotation_cleansUpTempFileEvenWhenLeakSwitchIsOn(@TempDir Path tmp) throws IOException {
+        // 修复后：QUOTATION_TEMP_LEAK 不再影响清理逻辑，开关即使为 true 也不留文件，
+        // 避免反复调用把 /data 写满（原场景1 主因）。
         service(tmp, true).generateQuotation("ORD-1003");
 
-        assertThat(countOf(tmp, "quotation_")).isEqualTo(1);
+        assertThat(countOf(tmp, "quotation_")).isZero();
     }
 
     @Test
@@ -66,6 +66,14 @@ class QuotationServiceTest {
         service(nested, false).generateQuotation("ORD-1004");
 
         assertThat(nested).exists();
+    }
+
+    @Test
+    void quotationSummary_failsWithBusinessErrorWhenTemplateMissing(@TempDir Path tmp) {
+        // 模板加载返回 null 时，应抛可定位的业务异常而不是 NPE。
+        assertThatThrownBy(() -> service(tmp, false).quotationSummary("ORD-1005"))
+                .isInstanceOf(QuotationException.class)
+                .hasMessageContaining("模板缺失");
     }
 
     @Test
