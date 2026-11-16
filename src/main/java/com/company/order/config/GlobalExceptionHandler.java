@@ -1,5 +1,6 @@
 package com.company.order.config;
 
+import com.company.order.service.QuotationStorageException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -42,6 +43,22 @@ import java.io.IOException;
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    /**
+     * 存储不可用（如 {@code /data} 写满）：属于依赖侧故障、语义上可重试，映射为 503。
+     *
+     * <p>与通用分支的区别只在状态码与日志签名：通用分支把所有异常都压成 500 +
+     * {@code unhandled exception}，磁盘类故障因此无法与代码缺陷区分。这里给出固定签名
+     * {@code quotation storage unavailable}，便于监控单独告警盘满，而不再是一次无信息的 500。
+     */
+    @ExceptionHandler(QuotationStorageException.class)
+    public void handleStorageUnavailable(QuotationStorageException e,
+                                         HttpServletRequest request,
+                                         HttpServletResponse response) throws IOException {
+        log.error("quotation storage unavailable: {} {} msg={}",
+                request.getMethod(), request.getRequestURI(), e.getMessage(), e);
+        response.sendError(HttpStatus.SERVICE_UNAVAILABLE.value());
+    }
 
     @ExceptionHandler(Exception.class)
     public void handle(Exception e, HttpServletRequest request, HttpServletResponse response) throws IOException {
